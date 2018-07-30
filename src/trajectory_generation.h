@@ -1,0 +1,6 @@
+#ifndef TRAJECTORY_GENERATION_H
+#define TRAJECTORY_GENERATION_H
+
+
+
+#endif
