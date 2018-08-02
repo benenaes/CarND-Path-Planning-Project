@@ -4,13 +4,12 @@
 #include "car_state.h"
 #include "predict.h"
 
-struct PrecalculatedTrajectory
-{
-	const std::vector<double> m_previous_path_x;
-	const std::vector<double> m_previous_path_y;
+#include <vector>
 
-	double m_end_path_s;
-	double m_end_path_d;
+struct CalculatedTrajectory
+{
+	std::vector<double> m_previous_path_x;
+	std::vector<double> m_previous_path_y;
 };
 
 class Behaviour
@@ -19,25 +18,63 @@ public:
 	enum class Manoeuver
 	{
 		FOLLOWING_LANE,
-		CHANGE_LEFT,
-		CHANGE_RIGHT
+		CHANGE_LANE
 	};
 
 	Behaviour(
-		unsigned int total_lanes, 
-		float normal_acceleration,
-		float target_speed);
+		const unsigned int total_lanes, 
+		const float normal_acceleration,
+		const float ideal_speed,
+		const unsigned int current_lane);
 
-	void calculate_new_behaviour(
+	CalculatedTrajectory calculate_new_behaviour(
 		const CarState& ego_car, 
 		const PredictionCalculator& prediction_calculator,
-		const PrecalculatedTrajectory& precalculated_trajectory);
+		const CalculatedTrajectory& precalculated_trajectory,
+		const std::vector<double>& map_waypoints_x,
+		const std::vector<double>& map_waypoints_y,
+		const std::vector<double>& map_waypoints_s);
 
 private:
+	CalculatedTrajectory create_trajectory_for_lane_change(
+		const CarState& ego_car,
+		const PredictionCalculator& prediction_calculator,
+		const CalculatedTrajectory& precalculated_trajectory,
+		const std::vector<double>& map_waypoints_x,
+		const std::vector<double>& map_waypoints_y,
+		const std::vector<double>& map_waypoints_s,
+		const double trajectory_time);
+
+	CalculatedTrajectory create_trajectory_for_velocity_change(
+		const CarState& ego_car,
+		const PredictionCalculator& prediction_calculator,
+		const CalculatedTrajectory& precalculated_trajectory,
+		const std::vector<double>& map_waypoints_x,
+		const std::vector<double>& map_waypoints_y,
+		const std::vector<double>& map_waypoints_s);
+
+	CalculatedTrajectory extend_trajectory(
+		const CarState& ego_car,
+		const PredictionCalculator& prediction_calculator,
+		const CalculatedTrajectory& precalculated_trajectory,
+		const std::vector<double>& map_waypoints_x,
+		const std::vector<double>& map_waypoints_y,
+		const std::vector<double>& map_waypoints_s);
+
+	CalculatedTrajectory apply_spline(
+		const CarState& ego_car,
+		const CalculatedTrajectory& calculated_trajectory,
+		const std::vector<double>& deltas,
+		const unsigned int points_to_reuse,
+		const std::vector<double>& map_waypoints_x,
+		const std::vector<double>& map_waypoints_y,
+		const std::vector<double>& map_waypoints_s);
+
 	Manoeuver m_CurrentManoeuver;
-	const float m_NormalAcceleration;
-	const float m_TargetSpeed;
+	const float m_NormalAcceleration;	// meter per second²
+	const float m_IdealSpeed;	// meter per second
 	unsigned int m_TargetLane;
+	float m_TargetSpeed; // meter per second
 	float m_TargetS;
 	const unsigned int m_TotalLanes;
 };

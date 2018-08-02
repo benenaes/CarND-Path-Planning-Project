@@ -42,7 +42,7 @@ int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vect
 
 }
 
-int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
+int NextWaypoint(double x, double y, double theta, const vector<double>& maps_x, const vector<double>& maps_y)
 {
 
 	int closestWaypoint = ClosestWaypoint(x, y, maps_x, maps_y);
@@ -68,7 +68,7 @@ int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x,
 }
 
 // Transform from Cartesian x,y coordinates to Frenet s,d coordinates
-vector<double> getFrenet(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
+vector<double> getFrenet(double x, double y, double theta, const vector<double>& maps_x, const vector<double>& maps_y)
 {
 	int next_wp = NextWaypoint(x, y, theta, maps_x, maps_y);
 
@@ -145,10 +145,20 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 float convert_from_middle_of_lane_to_d(unsigned int lane)
 {
-	return (lane * lane_size - lane_size / 2.);
+	return (lane * lane_size + lane_size / 2.);
 }
 
 unsigned int convert_from_d_to_lane(float d)
 {
 	return (unsigned int) floor(d / lane_size);
+}
+
+float mph_to_mps(float mph)
+{
+	return mph*0.44704;
+}
+
+float mps_to_mph(float mps)
+{
+	return mps*2.23;
 }

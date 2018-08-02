@@ -34,8 +34,11 @@ public:
 
 	FrenetCoordinate get_frenet_coord_of_car(unsigned int car_index, unsigned int point_in_time) const;
 
+	unsigned int get_horizon() const;
+
 private:
 	std::vector<CarPrediction> m_CarPredictions;
+	unsigned int m_Horizon;
 };
 
 #endif

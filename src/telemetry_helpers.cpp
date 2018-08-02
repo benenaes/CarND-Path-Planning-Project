@@ -25,7 +25,7 @@ CarState ego_car_state_from_telemetry(const nlohmann::basic_json<>& j)
 {
 	const double car_yaw = j[1]["yaw"];
 	const double ref_yaw = deg2rad(car_yaw);
-	const double car_speed = j[1]["speed"];
+	const double car_speed = mph_to_mps(j[1]["speed"]);
 	const double v_x = car_speed * cos(car_yaw);
 	const double v_y = car_speed * sin(car_yaw);
 	return CarState(-1, j[1]["x"], j[1]["y"], v_x, v_y, j[1]["s"], j[1]["d"]);
@@ -49,9 +49,9 @@ vector<CarState> car_states_from_sensor_fusion(const std::vector<std::vector<dou
 	return car_states;
 }
 
-PrecalculatedTrajectory precalculated_trajectory_from_telemetry(const nlohmann::basic_json<>& j)
+CalculatedTrajectory precalculated_trajectory_from_telemetry(const nlohmann::basic_json<>& j)
 {
-	PrecalculatedTrajectory trajectory = { j[1]["previous_path_x"], j[1]["previous_path_y"], j[1]["end_path_s"], j[1]["end_path_d"] };
+	CalculatedTrajectory trajectory = {j[1]["previous_path_x"], j[1]["previous_path_y"]};
 
 	return trajectory;
 }
