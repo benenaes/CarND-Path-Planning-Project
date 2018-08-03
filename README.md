@@ -160,3 +160,9 @@ Two types of trajectory generation methods are implemented:
   - Only data from the car up front and behind in each lane are taken into account. In many situations, this is enough, but sometimes it useful to know that other cars more up front are blocking the car up front.
   - Sometimes if the road is blocked by slower cars in all the lanes, then the behaviour model changes lane quite often. This is due to the fact that the cars up front sometimes accelerate or decelerate just briefly: this causes the behaviour model to consider a lane change. 
 - The conversion in between Frenet and map coordinates could be improved. Even with the offered solution in the Udacity Waffle, the conversion caused a lot of issues. A more granular Frenet grid of waypoints could improve the situation.
+
+## Demo
+
+A small video can be found in the repository. A situation is depicted where a car is following the car up front  (in the same lane) until the situation is reached where this car can be passed due to the fact that the minimum distance with the car in the back in the target lane is exceeded (and thus it is safe to change the lane).
+
+See: self_driving_car_nanodegree_program 03_08_2018 01_54_09.mp4
