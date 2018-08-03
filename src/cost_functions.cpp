@@ -5,6 +5,8 @@
 
 #include "cost_functions.h"
 
+using namespace std;
+
 float goal_distance_cost(
 	int goal_lane, int intended_lane, int final_lane, float distance_to_goal)
 {
@@ -69,7 +71,7 @@ float safety_off_the_road_cost(float d, float left_lane_d, float right_lane_d)
 float safety_car_distance(
 	const CarState& car_state, 
 	const FrenetCoordinate& goal, 
-	std::vector<CarPrediction>& car_predictions, 
+	const vector<CarPrediction>& car_predictions, 
 	float min_distance)
 {
 	float cost = 0;
@@ -78,14 +80,23 @@ float safety_car_distance(
 	{
 		float current_car_cost = 0;
 
-		const CarPrediction current_car_prediction = car_predictions[i];
+		const CarPrediction& current_car_prediction = car_predictions[i];
 
-		for (unsigned int j = 0; j < current_car_prediction.size(); ++j)
+		vector<double> pts_s;
+		vector<double> pts_d;
+
+		for (unsigned int j = 0; j < current_car_prediction.m_PositionPredictions.size(); ++j)
 		{
-			tk::spline s;
+			pts_s.push_back(current_car_prediction.m_PositionPredictions[j].m_s);
+			pts_d.push_back(current_car_prediction.m_PositionPredictions[j].m_d);
+		}
 
-			s.set_points(pts_x, pts_y);
+		tk::spline s;
 
+		s.set_points(pts_s, pts_d);
+
+		for (unsigned int j = 0; j < current_car_prediction.m_PositionPredictions.size(); ++j)
+		{
 			const double target_x = 30.0;
 			const double target_y = s(target_x);
 			const double target_dist = sqrt(pow(target_x, 2) + pow(target_y, 2));

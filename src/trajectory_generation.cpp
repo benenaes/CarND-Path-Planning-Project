@@ -1,6 +1,9 @@
-#include "trajectory_generation.h"
-
 #include "Eigen-3.3/Eigen/Dense"
+
+#include "conversion.h"
+#include "spline.h"
+
+#include "trajectory_generation.h"
 
 using namespace std;
 using Eigen::MatrixXd;
@@ -61,4 +64,77 @@ double poly_eval(const vector<double>& coeffs, double x)
 		temp += coeffs[i] * pow(x, i);
 	}
 	return temp;
+}
+
+CalculatedTrajectory calculate_spline_trajectory_in_lane(
+	vector<double>& pts_x,
+	vector<double>& pts_y,
+	unsigned int target_lane,
+	const vector<double>& deltas,
+	const vector<double>& map_waypoints_x,
+	const vector<double>& map_waypoints_y,
+	const vector<double>& map_waypoints_s)
+{
+	const double x_i = pts_x[pts_x.size() - 1];
+	const double y_i = pts_y[pts_x.size() - 1];
+	const double ref_yaw = atan2(y_i - pts_y[pts_x.size() - 2], x_i - pts_x[pts_x.size() - 2]);
+	const vector<double> last_point = getFrenet(x_i, y_i, ref_yaw, map_waypoints_x, map_waypoints_y);
+	const double last_point_s = last_point[0];
+	const double last_point_d = convert_from_middle_of_lane_to_d(target_lane);
+
+	vector<double> next_wp0 = getXY(last_point_s + 30, last_point_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+	vector<double> next_wp1 = getXY(last_point_s + 60, last_point_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+	vector<double> next_wp2 = getXY(last_point_s + 90, last_point_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+
+	pts_x.push_back(next_wp0[0]);
+	pts_x.push_back(next_wp1[0]);
+	pts_x.push_back(next_wp2[0]);
+
+	pts_y.push_back(next_wp0[1]);
+	pts_y.push_back(next_wp1[1]);
+	pts_y.push_back(next_wp2[1]);
+
+
+	// Convert spline points to coordinate system with the last point of the precalculated trajectory as the origin 
+	// and the axes of the car as x,y axes
+	for (unsigned int i = 0; i < pts_x.size(); ++i)
+	{
+		const double shift_x = pts_x[i] - x_i;
+		const double shift_y = pts_y[i] - y_i;
+
+		pts_x[i] = (shift_x * cos(ref_yaw) + shift_y * sin(ref_yaw));
+		pts_y[i] = (-shift_x * sin(ref_yaw) + shift_y * cos(ref_yaw));
+	}
+
+	tk::spline spline;
+
+	spline.set_points(pts_x, pts_y);
+
+	double x_add_on = 0;
+
+	vector<double> next_x_vals;
+	vector<double> next_y_vals;
+
+	for (unsigned int i = 0; i < deltas.size(); ++i)
+	{
+		double x_point = x_add_on + deltas[i];
+		double y_point = spline(x_point);
+
+		x_add_on = x_point;
+
+		double x_ref = x_point;
+		double y_ref = y_point;
+
+		// Back to original coordinate system
+		x_point = (x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw));
+		y_point = (x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw));
+
+		x_point += x_i;
+		y_point += y_i;
+
+		next_x_vals.push_back(x_point);
+		next_y_vals.push_back(y_point);
+	}
+
+	return { next_x_vals, next_y_vals };
 }

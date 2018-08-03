@@ -14,7 +14,7 @@ float speed_cost(float speed_limit, float current_velocity);
 float safety_car_distance(
 	const CarState& car_state, 
 	const FrenetCoordinate& goal,
-	std::vector<CarPrediction>& car_predictions, 
+	const std::vector<CarPrediction>& car_predictions, 
 	float min_distance);
 
 

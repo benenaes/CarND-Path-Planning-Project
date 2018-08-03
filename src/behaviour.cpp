@@ -2,8 +2,6 @@
 
 #include "cost_functions.h"
 #include "conversion.h"
-#include "trajectory_generation.h"
-#include "spline.h"
 
 #include <vector>
 #include <stdexcept>
@@ -27,7 +25,7 @@ const double max_sim_latency = 0.1; // 200 ms
 // min points to predict to take max sim latency into account
 const unsigned int min_points_to_predict = (unsigned int) ceil(max_sim_latency / time_interval);
 
-const unsigned int prediction_horizon = 50; // timesteps = 1 sec
+const unsigned int prediction_horizon = 100; // timesteps = 2 secs
 const unsigned int lane_size = 4; // m : size of a lane
 const double time_to_change_lane = 2.f; // secs
 
@@ -63,7 +61,7 @@ Behaviour::Behaviour(
 {
 }
 
-pair<optional<CarPrediction>, optional<CarPrediction>> vehicle_up_front_and_back(
+Behaviour::CarsInLane Behaviour::vehicle_up_front_and_back(
 	const CarState& ego_car,
 	const vector<CarPrediction>& cars_of_particular_lane,
 	unsigned int point_in_time)
@@ -121,7 +119,7 @@ pair<optional<CarPrediction>, optional<CarPrediction>> vehicle_up_front_and_back
 	return make_pair(up_front_car, back_car);
 }
 
-vector<vector<CarPrediction>> bin_vehicles_by_lane(
+vector<vector<CarPrediction>> Behaviour::bin_vehicles_by_lane(
 	const vector<CarPrediction>& close_by_car_predictions,
 	unsigned int point_in_time,
 	unsigned int total_lanes)
@@ -306,15 +304,10 @@ CalculatedTrajectory Behaviour::consider_lane_change(
 	}
 }
 
-CalculatedTrajectory Behaviour::calculate_new_behaviour(
-	const CarState& ego_car,
-	const PredictionCalculator& prediction_calculator,
-	const CalculatedTrajectory& precalculated_trajectory,
-	const vector<double>& map_waypoints_x,
-	const vector<double>& map_waypoints_y,
-	const vector<double>& map_waypoints_s)
+void Behaviour::print_state()
 {
 	cout << "Current state: ";
+
 	switch (m_CurrentManoeuver)
 	{
 	case Manoeuver::FOLLOWING_LANE:
@@ -334,21 +327,22 @@ CalculatedTrajectory Behaviour::calculate_new_behaviour(
 	}
 	}
 	cout << endl;
+}
 
-	const unsigned int previous_size = precalculated_trajectory.m_previous_path_x.size();
-	const unsigned int future_point = min(previous_size, prediction_calculator.get_horizon()) - 1;
-	cout << "Future point for prediction: " << future_point << endl;
-
+Behaviour::CarsPerLaneInfo Behaviour::determine_cars_up_front_and_behind_for_each_lane(
+	const CarState& ego_car,
+	const PredictionCalculator& prediction_calculator,
+	unsigned int future_point)
+{
 	// Bin all sensed vehicles per lane
 	vector<vector<CarPrediction>> vehicle_prediction_bins_per_lane = bin_vehicles_by_lane(
 		prediction_calculator.get_car_predictions(),
 		future_point,
 		m_TotalLanes);
-	const unsigned int current_ego_lane = convert_from_d_to_lane(ego_car.m_d);
 
 	vector<CarsInLane> cars_per_lane;
 	float fastest_velocity_up_front = 0;
-	float lane_with_fastest_velocity = 0;
+	unsigned int lane_with_fastest_velocity = 0;
 
 	// Calculate properties of each car up front and behind in each lane
 	for (unsigned int i = 0; i < m_TotalLanes; ++i)
@@ -374,72 +368,77 @@ CalculatedTrajectory Behaviour::calculate_new_behaviour(
 		}
 	}
 
-	switch (m_CurrentManoeuver)
+	return { cars_per_lane, fastest_velocity_up_front, lane_with_fastest_velocity };
+}
+
+CalculatedTrajectory Behaviour::following_lane_state(
+	const CarsPerLaneInfo& cars_per_lane_info,
+	const CarState& ego_car,
+	const CalculatedTrajectory& precalculated_trajectory,
+	const std::vector<double>& map_waypoints_x,
+	const std::vector<double>& map_waypoints_y,
+	const std::vector<double>& map_waypoints_s)
+{
+	const vector<CarsInLane>& cars_per_lane = get<0>(cars_per_lane_info);
+	const float fastest_velocity_up_front = get<1>(cars_per_lane_info);
+	const unsigned int lane_with_fastest_velocity = get<2>(cars_per_lane_info);
+
+	const unsigned int current_ego_lane = convert_from_d_to_lane(ego_car.m_d);
+
+	const CarsInLane& up_front_and_back = cars_per_lane[current_ego_lane];
+
+	// v_u = velocity of the car upfront in current lane if any, else m_TargetSpeed
+	float v_u = m_IdealSpeed;
+
+	const optional<CarPrediction>& optional_car_up_front = up_front_and_back.first;
+	double space_in_front_of_ego_car = max_distance_to_change_lane + 1;
+
+	if (optional_car_up_front)
 	{
-	case Manoeuver::FOLLOWING_LANE:
+		v_u = optional_car_up_front->m_SpeedPrediction;
+		space_in_front_of_ego_car = optional_car_up_front->m_PositionPredictions[0].m_s - ego_car.m_s;
+	}
+
+	cout << "Speed of car up front in lane if any: " << v_u << endl;
+	cout << "space_in_front_of_ego_car: " << space_in_front_of_ego_car << endl;
+	cout << "fastest_velocity_up_front: " << fastest_velocity_up_front << endl;
+	cout << "lane_with_fastest_velocity: " << lane_with_fastest_velocity << endl;
+	cout << "Target speed : " << m_TargetSpeed << endl;
+
+	// Safety first !
+	if (space_in_front_of_ego_car < safety_distance_front)
 	{
-		const CarsInLane& up_front_and_back = cars_per_lane[current_ego_lane];
+		cout << "Should decelerate" << endl;
+		m_TargetSpeed = v_u - acceleration_margin;
+		return create_trajectory_for_velocity_change(
+			ego_car,
+			precalculated_trajectory,
+			map_waypoints_x,
+			map_waypoints_y,
+			map_waypoints_s);
+	}
 
-		// v_u = velocity of the car upfront in current lane if any, else m_TargetSpeed
-		float v_u = m_IdealSpeed;
-
-		const optional<CarPrediction>& optional_car_up_front = up_front_and_back.first;
-		double space_in_front_of_ego_car = max_distance_to_change_lane + 1;
-
-		if (optional_car_up_front)
+	// If there is a faster lane and the car up front is close enough so that we should consider a lane change
+	if (v_u <= fastest_velocity_up_front - min_speed_diff_to_change_lane && space_in_front_of_ego_car < max_distance_to_change_lane)
+	{
+		return consider_lane_change(
+			ego_car,
+			cars_per_lane,
+			fastest_velocity_up_front,
+			lane_with_fastest_velocity,
+			precalculated_trajectory,
+			map_waypoints_x,
+			map_waypoints_y,
+			map_waypoints_s);
+	}
+	else // There is no faster lane
+	{
+		if (space_in_front_of_ego_car >= 30)
 		{
-			v_u = optional_car_up_front->m_SpeedPrediction;
-			space_in_front_of_ego_car = optional_car_up_front->m_PositionPredictions[0].m_s - ego_car.m_s;
-		}
-
-		cout << "Speed of car up front in lane if any: " << v_u << endl;
-		cout << "space_in_front_of_ego_car: " << space_in_front_of_ego_car << endl;
-		cout << "fastest_velocity_up_front: " << fastest_velocity_up_front << endl;
-		cout << "lane_with_fastest_velocity: " << lane_with_fastest_velocity << endl;
-
-		// If there is a faster lane and the car up front is close enough so that we should consider a lane change
-		if (v_u <= fastest_velocity_up_front - min_speed_diff_to_change_lane && space_in_front_of_ego_car < max_distance_to_change_lane)
-		{
-			return consider_lane_change(
-				ego_car,
-				cars_per_lane, 
-				fastest_velocity_up_front, 
-				lane_with_fastest_velocity,
-				precalculated_trajectory, 
-				map_waypoints_x, 
-				map_waypoints_y, 
-				map_waypoints_s);
-		}
-		else // There is no faster lane
-		{
-			if (space_in_front_of_ego_car >= 30)
+			if (m_TargetSpeed < m_IdealSpeed - acceleration_margin)
 			{
+				cout << "Should acccelerate, car up front is still far away. Current target speed: " << m_TargetSpeed << endl;
 				m_TargetSpeed = m_IdealSpeed;
-				return create_trajectory_for_velocity_change(
-					ego_car,
-					precalculated_trajectory,
-					map_waypoints_x,
-					map_waypoints_y,
-					map_waypoints_s);
-			}
-
-			if (m_TargetSpeed < v_u - acceleration_margin)
-			{
-				cout << "Should accelerate" << endl;
-
-				m_TargetSpeed = v_u;
-				return create_trajectory_for_velocity_change(
-					ego_car,
-					precalculated_trajectory,
-					map_waypoints_x,
-					map_waypoints_y,
-					map_waypoints_s);
-			}
-			else if (m_TargetSpeed > v_u + acceleration_margin ||
-				(space_in_front_of_ego_car < 20))
-			{
-				cout << "Should decelerate" << endl;
-				m_TargetSpeed = v_u - acceleration_margin;
 				return create_trajectory_for_velocity_change(
 					ego_car,
 					precalculated_trajectory,
@@ -459,142 +458,254 @@ CalculatedTrajectory Behaviour::calculate_new_behaviour(
 			}
 		}
 
-		break;
+		if (m_TargetSpeed > v_u + acceleration_margin)
+		{
+			cout << "Should decelerate" << endl;
+			m_TargetSpeed = v_u - acceleration_margin;
+			return create_trajectory_for_velocity_change(
+				ego_car,
+				precalculated_trajectory,
+				map_waypoints_x,
+				map_waypoints_y,
+				map_waypoints_s);
+		}
+		else if (m_TargetSpeed < v_u - acceleration_margin)
+		{
+			cout << "Should accelerate" << endl;
+
+			m_TargetSpeed = v_u;
+			return create_trajectory_for_velocity_change(
+				ego_car,
+				precalculated_trajectory,
+				map_waypoints_x,
+				map_waypoints_y,
+				map_waypoints_s);
+		}
+		else
+		{
+			cout << "Keep same velocity" << endl;
+			return extend_trajectory(
+				ego_car,
+				precalculated_trajectory,
+				map_waypoints_x,
+				map_waypoints_y,
+				map_waypoints_s);
+		}
+	}
+}
+
+CalculatedTrajectory Behaviour::change_lane_state(
+	const CarsPerLaneInfo& cars_per_lane_info,
+	const CarState& ego_car,
+	const CalculatedTrajectory& precalculated_trajectory,
+	const std::vector<double>& map_waypoints_x,
+	const std::vector<double>& map_waypoints_y,
+	const std::vector<double>& map_waypoints_s)
+{
+	const vector<CarsInLane>& cars_per_lane = get<0>(cars_per_lane_info);
+	const float fastest_velocity_up_front = get<1>(cars_per_lane_info);
+	const unsigned int lane_with_fastest_velocity = get<2>(cars_per_lane_info);
+
+	const CarsInLane& up_front_and_back_in_target_lane = cars_per_lane[m_TargetLane];
+	const optional<CarPrediction>& optional_car_up_front_target_lane = up_front_and_back_in_target_lane.first;
+
+	// If velocity of car up front changed, recalculate trajectory
+	if (optional_car_up_front_target_lane && optional_car_up_front_target_lane->m_SpeedPrediction < m_TargetSpeed - acceleration_margin)
+	{
+		cout << "Velocity of car up front changed" << endl;
+		m_TargetSpeed = optional_car_up_front_target_lane->m_SpeedPrediction;
+		const float time_to_chance_lane = 2.f; // secs
+		const float dt = max(0.5, abs(ego_car.m_d - convert_from_middle_of_lane_to_d(m_TargetLane)) / lane_size * time_to_chance_lane);
+		m_TargetS = ego_car.m_s + (m_TargetSpeed + ego_car.m_v) / 2 * dt;
+
+		return create_trajectory_for_lane_change(
+			ego_car,
+			precalculated_trajectory,
+			map_waypoints_x,
+			map_waypoints_y,
+			map_waypoints_s,
+			dt);
+	}
+	else if (ego_car.m_s > m_TargetS)
+	{
+		cout << "Done manoeuver" << endl;
+		m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
+		return extend_trajectory(
+			ego_car,
+			precalculated_trajectory,
+			map_waypoints_x,
+			map_waypoints_y,
+			map_waypoints_s);
+	}
+	else
+	{
+		cout << "Keep on changing lanes" << endl;
+		return extend_trajectory(
+			ego_car,
+			precalculated_trajectory,
+			map_waypoints_x,
+			map_waypoints_y,
+			map_waypoints_s);
+	}
+}
+
+CalculatedTrajectory Behaviour::slow_down_for_lane_change_state(
+	const CarsPerLaneInfo& cars_per_lane_info,
+	const CarState& ego_car,
+	const PredictionCalculator& prediction_calculator,
+	const CalculatedTrajectory& precalculated_trajectory,
+	const std::vector<double>& map_waypoints_x,
+	const std::vector<double>& map_waypoints_y,
+	const std::vector<double>& map_waypoints_s)
+{
+	const vector<CarsInLane>& cars_per_lane = get<0>(cars_per_lane_info);
+	const float fastest_velocity_up_front = get<1>(cars_per_lane_info);
+	const unsigned int lane_with_fastest_velocity = get<2>(cars_per_lane_info);
+
+	const unsigned int current_ego_lane = convert_from_d_to_lane(ego_car.m_d);
+
+	const CarsInLane& up_front_and_back = cars_per_lane[current_ego_lane];
+
+	// v_u = velocity of the car upfront in current lane if any, else m_TargetSpeed
+	float v_u = m_IdealSpeed;
+
+	const optional<CarPrediction>& optional_car_up_front = up_front_and_back.first;
+
+	// We look at the car up front for a longer distance, because we are slowing down due the slowness of this car
+	if (optional_car_up_front && optional_car_up_front->m_PositionPredictions[0].m_s)
+	{
+		v_u = optional_car_up_front->m_SpeedPrediction;
+	}
+
+	cout << "Speed of car up front in lane if any: " << v_u << endl;
+
+	// If there is still a faster lane
+	if (v_u <= fastest_velocity_up_front - min_speed_diff_to_change_lane)
+	{
+		for (const CarPrediction& car_prediction : prediction_calculator.get_car_predictions())
+		{
+			if (car_prediction.m_CarId == m_CarIdToSlowdownFor)
+			{
+				if (ego_car.m_s < car_prediction.m_PositionPredictions[0].m_s - safety_distance_front)
+				{
+					cout << "Safety distance behind car to slow down for, back to following lane state" << endl;
+
+					return consider_lane_change(
+						ego_car,
+						cars_per_lane,
+						fastest_velocity_up_front,
+						lane_with_fastest_velocity,
+						precalculated_trajectory,
+						map_waypoints_x,
+						map_waypoints_y,
+						map_waypoints_s);
+				}
+				else
+				{
+					cout << "ego s: " << ego_car.m_s << ", slow down car s: " << car_prediction.m_PositionPredictions[0].m_s << endl;
+					cout << "Continue at slower speed" << endl;
+					return extend_trajectory(
+						ego_car,
+						precalculated_trajectory,
+						map_waypoints_x,
+						map_waypoints_y,
+						map_waypoints_s);
+				}
+			}
+		}
+
+		// Car to slow down for not found: retry in FOLLOWING_LANE state
+		cout << "Car to slow down for not found: retry in FOLLOWING_LANE state" << endl;
+		m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
+
+		return precalculated_trajectory;
+	}
+	else
+	{
+		cout << "No faster lane anymore, back to FOLLOWING_LANE state" << endl;
+		m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
+		return precalculated_trajectory;
+
+		if (m_TargetSpeed < v_u - acceleration_margin)
+		{
+			cout << "No faster lane anymore, should regain speed again" << endl;
+			m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
+			m_TargetSpeed = v_u;
+			return create_trajectory_for_velocity_change(
+				ego_car,
+				precalculated_trajectory,
+				map_waypoints_x,
+				map_waypoints_y,
+				map_waypoints_s);
+		}
+		else
+		{
+			cout << "No faster lane anymore, continue at same speed" << endl;
+			m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
+			return extend_trajectory(
+				ego_car,
+				precalculated_trajectory,
+				map_waypoints_x,
+				map_waypoints_y,
+				map_waypoints_s);
+		}
+	}
+}
+
+CalculatedTrajectory Behaviour::calculate_new_behaviour(
+	const CarState& ego_car,
+	const PredictionCalculator& prediction_calculator,
+	const CalculatedTrajectory& precalculated_trajectory,
+	const vector<double>& map_waypoints_x,
+	const vector<double>& map_waypoints_y,
+	const vector<double>& map_waypoints_s)
+{
+	print_state();
+
+	const unsigned int previous_size = precalculated_trajectory.m_path_x.size();
+	const unsigned int future_point = min(previous_size, prediction_calculator.get_horizon()) - 1;
+	cout << "Future point for prediction: " << future_point << endl;
+	const CarsPerLaneInfo& cars_per_lane_info =
+		determine_cars_up_front_and_behind_for_each_lane(
+			ego_car,
+			prediction_calculator,
+			future_point);
+	const vector<CarsInLane>& cars_per_lane = get<0>(cars_per_lane_info);
+	const float fastest_velocity_up_front = get<1>(cars_per_lane_info);
+	const unsigned int lane_with_fastest_velocity = get<2>(cars_per_lane_info);
+
+	switch (m_CurrentManoeuver)
+	{
+	case Manoeuver::FOLLOWING_LANE:
+	{
+		return following_lane_state(
+			cars_per_lane_info,
+			ego_car,
+			precalculated_trajectory,
+			map_waypoints_x,
+			map_waypoints_y,
+			map_waypoints_s);
 	}
 	case Manoeuver::CHANGE_LANE:
 	{
-		const CarsInLane& up_front_and_back_in_target_lane = cars_per_lane[m_TargetLane];
-		const optional<CarPrediction>& optional_car_up_front_target_lane = up_front_and_back_in_target_lane.first;
-
-		// TODO: If velocity of car up front changed or distance smaller than safety distance, recalculate trajectory
-		if (optional_car_up_front_target_lane && optional_car_up_front_target_lane->m_SpeedPrediction < m_TargetSpeed - acceleration_margin)
-		{
-			cout << "Velocity of car up front changed" << endl;
-			m_TargetSpeed = optional_car_up_front_target_lane->m_SpeedPrediction;
-			const float time_to_chance_lane = 2.f; // secs
-			const float dt = max(0.5, abs(ego_car.m_d - convert_from_middle_of_lane_to_d(m_TargetLane)) / lane_size * time_to_chance_lane);
-			m_TargetS = ego_car.m_s + (m_TargetSpeed + ego_car.m_v) / 2 * dt;
-
-			return create_trajectory_for_lane_change(
-				ego_car,
-				precalculated_trajectory,
-				map_waypoints_x,
-				map_waypoints_y,
-				map_waypoints_s,
-				dt);
-		}
-		else if (ego_car.m_s > m_TargetS)
-		{
-			cout << "Done manoeuver" << endl;
-			m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
-			return extend_trajectory(
-				ego_car,
-				precalculated_trajectory,
-				map_waypoints_x,
-				map_waypoints_y,
-				map_waypoints_s);
-		}
-		else
-		{
-			cout << "Keep on changing lanes" << endl;
-			return extend_trajectory(
-				ego_car,
-				precalculated_trajectory,
-				map_waypoints_x,
-				map_waypoints_y,
-				map_waypoints_s);
-		}
-		break;
+		return change_lane_state(
+			cars_per_lane_info,
+			ego_car,
+			precalculated_trajectory,
+			map_waypoints_x,
+			map_waypoints_y,
+			map_waypoints_s);
 	}
 	case Manoeuver::SLOW_DOWN_FOR_LANE_CHANGE:
 	{
-		const CarsInLane& up_front_and_back = cars_per_lane[current_ego_lane];
-
-		// v_u = velocity of the car upfront in current lane if any, else m_TargetSpeed
-		float v_u = m_IdealSpeed;
-
-		const optional<CarPrediction>& optional_car_up_front = up_front_and_back.first;
-
-		// We look at the car up front for a longer distance, because we are slowing down due the slowness of this car
-		if (optional_car_up_front && optional_car_up_front->m_PositionPredictions[0].m_s)
-		{
-			v_u = optional_car_up_front->m_SpeedPrediction;
-		}
-
-		cout << "Speed of car up front in lane if any: " << v_u << endl;
-
-		// If there is still a faster lane
-		if (v_u <= fastest_velocity_up_front - min_speed_diff_to_change_lane)
-		{
-			for (const CarPrediction& car_prediction : prediction_calculator.get_car_predictions())
-			{
-				if (car_prediction.m_CarId == m_CarIdToSlowdownFor)
-				{
-					if (ego_car.m_s < car_prediction.m_PositionPredictions[0].m_s - safety_distance_front)
-					{
-						cout << "Safety distance behind car to slow down for, back to following lane state" << endl;
-
-						return consider_lane_change(
-							ego_car,
-							cars_per_lane,
-							fastest_velocity_up_front,
-							lane_with_fastest_velocity,
-							precalculated_trajectory,
-							map_waypoints_x,
-							map_waypoints_y,
-							map_waypoints_s);
-					}
-					else
-					{
-						cout << "ego s: " << ego_car.m_s << ", slow down car s: " << car_prediction.m_PositionPredictions[0].m_s << endl;
-						cout << "Continue at slower speed" << endl;
-						return extend_trajectory(
-							ego_car,
-							precalculated_trajectory,
-							map_waypoints_x,
-							map_waypoints_y,
-							map_waypoints_s);
-					}
-				}
-			}
-
-			// Car to slow down for not found: retry in FOLLOWING_LANE state
-			cout << "Car to slow down for not found: retry in FOLLOWING_LANE state" << endl;
-			m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
-
-			return precalculated_trajectory;
-		}
-		else
-		{
-			cout << "No faster lane anymore, back to FOLLOWING_LANE state" << endl;
-			m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
-			return precalculated_trajectory;
-
-			if (m_TargetSpeed < v_u - acceleration_margin)
-			{
-				cout << "No faster lane anymore, should regain speed again" << endl;
-				m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
-				m_TargetSpeed = v_u;
-				return create_trajectory_for_velocity_change(
-					ego_car,
-					precalculated_trajectory,
-					map_waypoints_x,
-					map_waypoints_y,
-					map_waypoints_s);
-			}
-			else
-			{
-				cout << "No faster lane anymore, continue at same speed" << endl;
-				m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
-				return extend_trajectory(
-					ego_car,
-					precalculated_trajectory,
-					map_waypoints_x,
-					map_waypoints_y,
-					map_waypoints_s);
-			}
-		}
-		break;
+		return slow_down_for_lane_change_state(
+			cars_per_lane_info,
+			ego_car,
+			prediction_calculator,
+			precalculated_trajectory,
+			map_waypoints_x,
+			map_waypoints_y,
+			map_waypoints_s);
 	}
 	}
 }
@@ -609,7 +720,7 @@ CalculatedTrajectory Behaviour::create_trajectory_for_lane_change(
 {
 	cout << "Trajectory time: " << trajectory_time << endl;
 
-	const unsigned int points_to_reuse = min((unsigned int)precalculated_trajectory.m_previous_path_x.size(), min_points_to_predict);
+	const unsigned int points_to_reuse = min((unsigned int)precalculated_trajectory.m_path_x.size(), min_points_to_predict);
 
 	vector<double> next_x_vals;
 	vector<double> next_y_vals;
@@ -617,19 +728,19 @@ CalculatedTrajectory Behaviour::create_trajectory_for_lane_change(
 	// Already calculated path points
 	for (unsigned int i = 0; i < points_to_reuse; ++i)
 	{
-		next_x_vals.push_back(precalculated_trajectory.m_previous_path_x[i]);
-		next_y_vals.push_back(precalculated_trajectory.m_previous_path_y[i]);
+		next_x_vals.push_back(precalculated_trajectory.m_path_x[i]);
+		next_y_vals.push_back(precalculated_trajectory.m_path_y[i]);
 	}
 
-	const double x_i = precalculated_trajectory.m_previous_path_x[points_to_reuse - 1];
-	const double y_i = precalculated_trajectory.m_previous_path_y[points_to_reuse - 1];
+	const double x_i = precalculated_trajectory.m_path_x[points_to_reuse - 1];
+	const double y_i = precalculated_trajectory.m_path_y[points_to_reuse - 1];
 	
 	double heading = 0;
 
 	if (points_to_reuse > 1)
 	{
-		const double prev_x_i = precalculated_trajectory.m_previous_path_x[points_to_reuse - 2];
-		const double prev_y_i = precalculated_trajectory.m_previous_path_y[points_to_reuse - 2];
+		const double prev_x_i = precalculated_trajectory.m_path_x[points_to_reuse - 2];
+		const double prev_y_i = precalculated_trajectory.m_path_y[points_to_reuse - 2];
 
 		heading = atan2((y_i - prev_y_i), (x_i - prev_x_i));
 	}
@@ -640,15 +751,10 @@ CalculatedTrajectory Behaviour::create_trajectory_for_lane_change(
 	const vector<double>& sd_i = getFrenet(x_i, y_i, heading, map_waypoints_x, map_waypoints_y);
 	const double s_i = sd_i[0];
 	const double d_i = sd_i[1];
-	//const vector<double>& xy = getXY(s_i, d_i, map_waypoints_s, map_waypoints_x, map_waypoints_y);
 	cout << "Start Frenet: " << s_i << " " << d_i << endl;
 	//cout << "Recalculated x,y from Frenet: " << xy[0] << " " << xy[1] << endl;
 	cout << "Ego car velocity: " << ego_car.m_v << endl;
 	
-	//double ds_i = 0;
-	//double dd_i = 0;
-	//double d2s_i = 0;
-	//double d2d_i = 0;
 
 	double v_x = 0;
 	double v_y = 0;
@@ -656,17 +762,18 @@ CalculatedTrajectory Behaviour::create_trajectory_for_lane_change(
 	double a_x = 0;
 	double a_y = 0;
 
+	// Calculate start parameters for JMT at the end of the part of the trajectory to reuse
 	if (points_to_reuse > 3)
 	{
-		const double prev_x_i = precalculated_trajectory.m_previous_path_x[points_to_reuse - 2];
-		const double prev_y_i = precalculated_trajectory.m_previous_path_y[points_to_reuse - 2];
+		const double prev_x_i = precalculated_trajectory.m_path_x[points_to_reuse - 2];
+		const double prev_y_i = precalculated_trajectory.m_path_y[points_to_reuse - 2];
 
 		v_x = (x_i - prev_x_i) / time_interval;
 		v_y = (y_i - prev_y_i) / time_interval;
 		v = sqrt(v_x * v_x + v_y * v_y);
 
-		const double prev2_x_i = precalculated_trajectory.m_previous_path_x[points_to_reuse - 3];
-		const double prev2_y_i = precalculated_trajectory.m_previous_path_y[points_to_reuse - 3];
+		const double prev2_x_i = precalculated_trajectory.m_path_x[points_to_reuse - 3];
+		const double prev2_y_i = precalculated_trajectory.m_path_y[points_to_reuse - 3];
 
 		const double v_x_prev = (prev_x_i - prev2_x_i) / time_interval;
 		const double v_y_prev = (prev_y_i - prev2_y_i) / time_interval;
@@ -676,51 +783,29 @@ CalculatedTrajectory Behaviour::create_trajectory_for_lane_change(
 
 		double prev_heading = atan2((prev_y_i - prev2_y_i), (prev_x_i - prev2_x_i));
 		cout << "prev_heading: " << prev_heading << endl;
-
-		//const vector<double> prev_sd_i = getFrenet(prev_x_i, prev_y_i, prev_heading, map_waypoints_x, map_waypoints_y);
-		//const double prev_s_i = prev_sd_i[0];
-		//cout << "prev_s_i: " << prev_s_i << endl;
-		//cout << "s_i: " << s_i << endl;
-		//const double prev_d_i = prev_sd_i[1];
-
-		//ds_i = (s_i - prev_s_i) / time_interval;
-		//dd_i = (d_i - prev_d_i) / time_interval;
-
-		//const double prev3_x_i = precalculated_trajectory.m_previous_path_x[points_to_reuse - 4];
-		//const double prev3_y_i = precalculated_trajectory.m_previous_path_y[points_to_reuse - 4];
-
-		//double prev2_heading = atan2((prev2_y_i - prev3_y_i), (prev2_x_i - prev3_x_i));
-
-		//const vector<double> prev2_sd_i = getFrenet(prev2_x_i, prev2_y_i, prev2_heading, map_waypoints_x, map_waypoints_y);
-		//const double prev2_s_i = prev2_sd_i[0];
-		//const double prev2_d_i = prev2_sd_i[1];
-
-		//const double prev_ds_i = (prev_s_i - prev2_s_i) / time_interval;
-		//const double prev_dd_i = (prev_d_i - prev2_d_i) / time_interval;
-
-		//d2s_i = ds_i - prev_ds_i;
-		//d2d_i = dd_i - prev_dd_i;
 	}
 
-	//cout << "Current ds_i: " << ds_i << endl;
-
+	// Calculate end speed of JMT
 	const float min_conf_speed = v - (trajectory_time / time_interval) * m_NormalAcceleration;
 	const float max_conf_speed = v + (trajectory_time / time_interval) * m_NormalAcceleration;
 	const double v_f = max(min_conf_speed, min(m_TargetSpeed, max_conf_speed));
 	cout << "Target final speed: " << m_TargetSpeed << ", final speed adapted to max. acc/deceleration: " << v_f << endl;
 
+	// Calculate end locations of JMT in Frenet coordinate system 
 	const double ds_f = max(min_conf_speed, min(m_TargetSpeed, max_conf_speed));
 	cout << "Target ds_f: " << ds_f << endl;
-	//const double d2s_f = 0;
 
 	double s_f = s_i + trajectory_time * (ds_f + v) / 2.f;
 	const double d_f = convert_from_middle_of_lane_to_d(m_TargetLane);
 
+	// Max distance to cover in JMT, otherwise the JMT might exceed speed limits somewhere in the middle
+	double max_dist = trajectory_time * (v + v_f) / 2;
+
+	// Now correct for any discontinuities / miscalculations in (s,d) coordinate systems
 	const vector<double>& point_f = getXY(s_f, d_f, map_waypoints_s, map_waypoints_x, map_waypoints_y);
 	cout << "Initial destination point: " << point_f[0] << " " << point_f[1] << endl;
 
 	double dist = sqrt(pow(point_f[1] - y_i, 2) + pow(point_f[0] - x_i, 2));
-	double max_dist = trajectory_time * (v + v_f) / 2;
 
 	while (dist < max_dist - 0.5)
 	{
@@ -739,6 +824,7 @@ CalculatedTrajectory Behaviour::create_trajectory_for_lane_change(
 		dist = sqrt(pow(new_point_f[1] - y_i, 2) + pow(new_point_f[0] - x_i, 2));
 	}
 
+	// We also need the heading at the end point for good estimates of v_x, v_y 
 	const double s_f_next = s_f + time_interval * ds_f;
 
 	const vector<double>& final_point_f = getXY(s_f, d_f, map_waypoints_s, map_waypoints_x, map_waypoints_y);
@@ -748,9 +834,8 @@ CalculatedTrajectory Behaviour::create_trajectory_for_lane_change(
 
 	cout << "Target lane: " << m_TargetLane << endl;
 	cout << "d_f: " << d_f << endl;
-	//const double dd_f = 0;
-	//const double d2d_f = 0;
 
+	// Calculate the v_x, v_y components from v_f and the calculated heading
 	const double v_f_x = v_f * cos(heading_f);
 	const double v_f_y = v_f * sin(heading_f);
 
@@ -762,15 +847,6 @@ CalculatedTrajectory Behaviour::create_trajectory_for_lane_change(
 
 	const vector<double>& x_traj = JMT(start_x, end_x, trajectory_time);
 	const vector<double>& y_traj = JMT(start_y, end_y, trajectory_time);
-
-	//const vector<double> start_s = {s_i, ds_i, d2s_i};
-	//const vector<double> end_s = {s_f, ds_f, d2s_f};
-
-	//const vector<double> start_d = {d_i, dd_i, d2d_i};
-	//const vector<double> end_d = {d_f, dd_f, d2d_f};
-
-	//const vector<double>& s_traj = JMT(start_s, end_s, trajectory_time);
-	//const vector<double>& d_traj = JMT(start_d, end_d, trajectory_time);
 
 	const unsigned int extra_points = trajectory_time / time_interval;
 	cout << "Extra points: " << extra_points << endl;
@@ -786,18 +862,6 @@ CalculatedTrajectory Behaviour::create_trajectory_for_lane_change(
 
 		next_x_vals.push_back(x);
 		next_y_vals.push_back(y);
-
-		//double s = poly_eval(s_traj, t);
-		//double d = poly_eval(d_traj, t);
-
-		//cout << "Time: " << t << ", Frenet coord: " << s << " " << d << endl;
-
-		//const vector<double>& xy = getXY(s, d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-
-		//cout << "Converted to: " << xy[0] << " " << xy[1] << endl;
-
-		//next_x_vals.push_back(xy[0]);
-		//next_y_vals.push_back(xy[1]);
 	}
 
 	cout << "Calculated trajectory for lane change: " << endl;
@@ -831,7 +895,7 @@ CalculatedTrajectory Behaviour::create_trajectory_for_velocity_change(
 	const std::vector<double>& map_waypoints_y,
 	const std::vector<double>& map_waypoints_s)
 {
-	const unsigned int points_to_reuse = min((unsigned int)precalculated_trajectory.m_previous_path_x.size(), min_points_to_predict);
+	const unsigned int points_to_reuse = min((unsigned int)precalculated_trajectory.m_path_x.size(), min_points_to_predict);
 
 	vector<double> next_x_vals;
 	vector<double> next_y_vals;
@@ -840,12 +904,12 @@ CalculatedTrajectory Behaviour::create_trajectory_for_velocity_change(
 	// Already calculated path points
 	for (unsigned int i = 0; i < points_to_reuse; ++i)
 	{
-		next_x_vals.push_back(precalculated_trajectory.m_previous_path_x[i]);
-		next_y_vals.push_back(precalculated_trajectory.m_previous_path_y[i]);
+		next_x_vals.push_back(precalculated_trajectory.m_path_x[i]);
+		next_y_vals.push_back(precalculated_trajectory.m_path_y[i]);
 	}
 
-	const double x_i = precalculated_trajectory.m_previous_path_x[points_to_reuse - 1];
-	const double y_i = precalculated_trajectory.m_previous_path_y[points_to_reuse - 1];
+	const double x_i = precalculated_trajectory.m_path_x[points_to_reuse - 1];
+	const double y_i = precalculated_trajectory.m_path_y[points_to_reuse - 1];
 
 	float velocity = ego_car.m_v;
 
@@ -853,8 +917,8 @@ CalculatedTrajectory Behaviour::create_trajectory_for_velocity_change(
 
 	if (points_to_reuse > 1)
 	{
-		const double prev_x_i = precalculated_trajectory.m_previous_path_x[points_to_reuse - 2];
-		const double prev_y_i = precalculated_trajectory.m_previous_path_y[points_to_reuse - 2];
+		const double prev_x_i = precalculated_trajectory.m_path_x[points_to_reuse - 2];
+		const double prev_y_i = precalculated_trajectory.m_path_y[points_to_reuse - 2];
 
 		heading = atan2((y_i - prev_y_i), (x_i - prev_x_i));
 
@@ -887,30 +951,20 @@ CalculatedTrajectory Behaviour::create_trajectory_for_velocity_change(
 		const float delta = velocity * time_interval;
 		deltas.push_back(delta);
 		s_i += delta;
-
-		//const vector<double>& xy = getXY(s_i, last_point_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-
-		//next_x_vals.push_back(xy[0]);
-		//next_y_vals.push_back(xy[1]);
 	}
 
 	cout << "# predicted points for velocity change " << next_x_vals.size() << endl;
 
-	for (unsigned int i = deltas.size(); i < 100; ++i)
+	for (unsigned int i = deltas.size(); i < prediction_horizon; ++i)
 	{
 		const float delta = velocity * time_interval;
 		deltas.push_back(delta);
 		s_i += delta;
-
-		//const vector<double>& xy = getXY(s_i, last_point_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-
-		//next_x_vals.push_back(xy[0]);
-		//next_y_vals.push_back(xy[1]);
 	}
 
 	cout << "Current ego car location: " << ego_car.m_x << " " << ego_car.m_y << endl;
 
-	const CalculatedTrajectory& smoothened_path = apply_spline(
+	const CalculatedTrajectory& smoothened_path = extend_trajectory_with_lane_spline(
 		ego_car, 
 		CalculatedTrajectory{ next_x_vals, next_y_vals }, 
 		deltas,
@@ -919,16 +973,10 @@ CalculatedTrajectory Behaviour::create_trajectory_for_velocity_change(
 		map_waypoints_y,
 		map_waypoints_s);
 
-	//cout << "Deltas: " << endl;
-	//for (unsigned int i = 0; i < deltas.size(); ++i)
-	//{
-	//	cout << deltas[i] << endl;
-	//}
-
-	for (unsigned int i = 0; i < smoothened_path.m_previous_path_x.size(); ++i)
+	for (unsigned int i = 0; i < smoothened_path.m_path_x.size(); ++i)
 	{
-		next_x_vals.push_back(smoothened_path.m_previous_path_x[i]);
-		next_y_vals.push_back(smoothened_path.m_previous_path_y[i]);
+		next_x_vals.push_back(smoothened_path.m_path_x[i]);
+		next_y_vals.push_back(smoothened_path.m_path_y[i]);
 	}
 
 	cout << "create_trajectory_for_velocity_change Trajectory: " << endl;
@@ -953,27 +1001,24 @@ CalculatedTrajectory Behaviour::extend_trajectory(
 	vector<double> next_y_vals;
 	vector<double> deltas;
 
-	//cout << "Precalculated trajectory: " << endl;
-
 	// Already calculated path points
-	for (unsigned int i = 0; i < precalculated_trajectory.m_previous_path_x.size(); ++i)
+	for (unsigned int i = 0; i < precalculated_trajectory.m_path_x.size(); ++i)
 	{
-		next_x_vals.push_back(precalculated_trajectory.m_previous_path_x[i]);
-		next_y_vals.push_back(precalculated_trajectory.m_previous_path_y[i]);
-		//cout << next_x_vals[i] << " " << next_y_vals[i] << endl;
+		next_x_vals.push_back(precalculated_trajectory.m_path_x[i]);
+		next_y_vals.push_back(precalculated_trajectory.m_path_y[i]);
 	}
 
-	const double x_i = precalculated_trajectory.m_previous_path_x[precalculated_trajectory.m_previous_path_x.size() - 1];
-	const double y_i = precalculated_trajectory.m_previous_path_y[precalculated_trajectory.m_previous_path_x.size() - 1];
+	const double x_i = precalculated_trajectory.m_path_x[precalculated_trajectory.m_path_x.size() - 1];
+	const double y_i = precalculated_trajectory.m_path_y[precalculated_trajectory.m_path_x.size() - 1];
 
 	float velocity = ego_car.m_v;
 
 	double heading = 0;
 
-	if (precalculated_trajectory.m_previous_path_x.size() > 1)
+	if (precalculated_trajectory.m_path_x.size() > 1)
 	{
-		const double prev_x_i = precalculated_trajectory.m_previous_path_x[precalculated_trajectory.m_previous_path_x.size() - 2];
-		const double prev_y_i = precalculated_trajectory.m_previous_path_y[precalculated_trajectory.m_previous_path_x.size() - 2];
+		const double prev_x_i = precalculated_trajectory.m_path_x[precalculated_trajectory.m_path_x.size() - 2];
+		const double prev_y_i = precalculated_trajectory.m_path_y[precalculated_trajectory.m_path_x.size() - 2];
 
 		heading = atan2((y_i - prev_y_i), (x_i - prev_x_i));
 
@@ -990,35 +1035,29 @@ CalculatedTrajectory Behaviour::extend_trajectory(
 	cout << "Last point: " << xy_check[0] << " " << xy_check[1] << endl;
 
 	double s_i = last_point_s;
-	for (unsigned int i = precalculated_trajectory.m_previous_path_x.size(); i < 100; ++i)
+	for (unsigned int i = precalculated_trajectory.m_path_x.size(); i < prediction_horizon; ++i)
 	{
-		//const float delta = velocity * time_interval;
 		const float delta = m_TargetSpeed * time_interval;
 		deltas.push_back(delta);
 		cout << "Delta: " << delta << endl;
 		s_i += velocity * time_interval;
-
-		//const vector<double>& xy = getXY(s_i, last_point_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-
-		//next_x_vals.push_back(xy[0]);
-		//next_y_vals.push_back(xy[1]);
 	}
 
 	if (deltas.size() > 2)
 	{
-		const CalculatedTrajectory& smoothened_path = apply_spline(
+		const CalculatedTrajectory& smoothened_path = extend_trajectory_with_lane_spline(
 			ego_car,
 			CalculatedTrajectory{ next_x_vals, next_y_vals },
 			deltas,
-			precalculated_trajectory.m_previous_path_x.size(),
+			precalculated_trajectory.m_path_x.size(),
 			map_waypoints_x,
 			map_waypoints_y,
 			map_waypoints_s);
 
-		for (unsigned int i = 0; i < smoothened_path.m_previous_path_x.size(); ++i)
+		for (unsigned int i = 0; i < smoothened_path.m_path_x.size(); ++i)
 		{
-			next_x_vals.push_back(smoothened_path.m_previous_path_x[i]);
-			next_y_vals.push_back(smoothened_path.m_previous_path_y[i]);
+			next_x_vals.push_back(smoothened_path.m_path_x[i]);
+			next_y_vals.push_back(smoothened_path.m_path_y[i]);
 		}
 	}
 
@@ -1033,7 +1072,7 @@ CalculatedTrajectory Behaviour::extend_trajectory(
 	return { next_x_vals, next_y_vals };
 }
 
-CalculatedTrajectory Behaviour::apply_spline(
+CalculatedTrajectory Behaviour::extend_trajectory_with_lane_spline(
 	const CarState& ego_car,
 	const CalculatedTrajectory& calculated_trajectory,
 	const vector<double>& deltas,
@@ -1062,16 +1101,11 @@ CalculatedTrajectory Behaviour::apply_spline(
 	}
 	else
 	{
-		//for (unsigned int i = 0; i < previous_size; ++i)
-		//{
-		//	std::cout << previous_path_x[i] << " " << previous_path_y[i] << std::endl;
-		//}
+		ref_x = calculated_trajectory.m_path_x[points_to_reuse - 1];
+		ref_y = calculated_trajectory.m_path_y[points_to_reuse - 1];
 
-		ref_x = calculated_trajectory.m_previous_path_x[points_to_reuse - 1];
-		ref_y = calculated_trajectory.m_previous_path_y[points_to_reuse - 1];
-
-		const double prev_car_x = calculated_trajectory.m_previous_path_x[points_to_reuse - 2];
-		const double prev_car_y = calculated_trajectory.m_previous_path_y[points_to_reuse - 2];
+		const double prev_car_x = calculated_trajectory.m_path_x[points_to_reuse - 2];
+		const double prev_car_y = calculated_trajectory.m_path_y[points_to_reuse - 2];
 		ref_yaw = atan2(ref_y - prev_car_y, ref_x - prev_car_x);
 
 		pts_x.push_back(prev_car_x);
@@ -1080,73 +1114,12 @@ CalculatedTrajectory Behaviour::apply_spline(
 		pts_y.push_back(ref_y);
 	}
 
-	const double x_i = calculated_trajectory.m_previous_path_x[points_to_reuse - 1];
-	const double y_i = calculated_trajectory.m_previous_path_y[points_to_reuse - 1];
-	const vector<double> last_point = getFrenet(x_i, y_i, ref_yaw, map_waypoints_x, map_waypoints_y);
-	const double last_point_s = last_point[0];
-	const double last_point_d = convert_from_middle_of_lane_to_d(m_TargetLane);
-
-	vector<double> next_wp0 = getXY(last_point_s + 30, last_point_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-	vector<double> next_wp1 = getXY(last_point_s + 60, last_point_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-	vector<double> next_wp2 = getXY(last_point_s + 90, last_point_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-
-	pts_x.push_back(next_wp0[0]);
-	pts_x.push_back(next_wp1[0]);
-	pts_x.push_back(next_wp2[0]);
-
-	pts_y.push_back(next_wp0[1]);
-	pts_y.push_back(next_wp1[1]);
-	pts_y.push_back(next_wp2[1]);
-
-	for (unsigned int i = 0; i < pts_x.size(); ++i)
-	{
-		//std::cout << pts_x[i] << " " << pts_y[i] << std::endl;
-
-		const double shift_x = pts_x[i] - ref_x;
-		const double shift_y = pts_y[i] - ref_y;
-
-		pts_x[i] = (shift_x * cos(ref_yaw) + shift_y * sin(ref_yaw));
-		pts_y[i] = (-shift_x * sin(ref_yaw) + shift_y * cos(ref_yaw));
-
-		//std::cout << pts_x[i] << " " << pts_y[i] << std::endl;
-	}
-
-	tk::spline spline;
-
-	spline.set_points(pts_x, pts_y);
-
-	//const double target_x = 30.0;
-	//const double target_y = spline(target_x);
-	//const double target_dist = sqrt(pow(target_x, 2) + pow(target_y, 2));
-
-	double x_add_on = 0;
-
-	//const double dist_inc = 0.5;
-	//const unsigned int horizon = 50; // number of points to plan 
-
-	vector<double> next_x_vals;
-	vector<double> next_y_vals;
-
-	for (unsigned int i=0; i < deltas.size(); ++i)
-	{
-		//double N = target_dist / (time_interval * ref_vel * 0.44704);
-		double x_point = x_add_on + deltas[i];
-		double y_point = spline(x_point);
-
-		x_add_on = x_point;
-
-		double x_ref = x_point;
-		double y_ref = y_point;
-
-		x_point = (x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw));
-		y_point = (x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw));
-
-		x_point += ref_x;
-		y_point += ref_y;
-
-		next_x_vals.push_back(x_point);
-		next_y_vals.push_back(y_point);
-	}
-
-	return { next_x_vals, next_y_vals };
+	return calculate_spline_trajectory_in_lane(
+		pts_x, 
+		pts_y, 
+		m_TargetLane, 
+		deltas, 
+		map_waypoints_x, 
+		map_waypoints_y, 
+		map_waypoints_s);
 }
