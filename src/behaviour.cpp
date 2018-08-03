@@ -16,9 +16,10 @@
 
 using namespace std;
 
-const float safety_distance_front = 15; // meter
+const float safety_distance_front = 10; // meter
 const float safety_distance_back = 5; // meter
 const float min_speed_diff_to_change_lane = 2; // m/s
+const float max_distance_to_change_lane = 50; // m: max distance for a car up front to consider a lane change
 
 const double time_interval = 0.02; // 20 ms
 const double max_sim_latency = 0.1; // 200 ms
@@ -57,7 +58,8 @@ Behaviour::Behaviour(
 	m_TotalLanes(total_lanes),
 	m_TargetLane(current_lane),
 	m_TargetSpeed(0),
-	m_TargetS(0)
+	m_TargetS(0),
+	m_CarIdToSlowdownFor(-1)
 {
 }
 
@@ -155,6 +157,155 @@ vector<vector<CarPrediction>> bin_vehicles_by_lane(
 	return car_predictions_per_lane;
 }
 
+CalculatedTrajectory Behaviour::consider_lane_change(
+	const CarState& ego_car,
+	const vector<CarsInLane>& cars_per_lane,
+	float fastest_velocity_up_front,
+	float lane_with_fastest_velocity,
+	const CalculatedTrajectory& precalculated_trajectory,
+	const vector<double>& map_waypoints_x,
+	const vector<double>& map_waypoints_y,
+	const vector<double>& map_waypoints_s)
+{
+	const unsigned int current_ego_lane = convert_from_d_to_lane(ego_car.m_d);
+
+	cout << "Current target lane: " << m_TargetLane << endl;
+	cout << "Considering another lane: " << lane_with_fastest_velocity << endl;
+	cout << "Velocity there: " << fastest_velocity_up_front << endl;
+
+	if (lane_with_fastest_velocity < current_ego_lane)
+	{
+		m_TargetLane = current_ego_lane - 1;
+	}
+	else
+	{
+		m_TargetLane = current_ego_lane + 1;
+	}
+
+	const CarsInLane& up_front_and_back_in_target_lane = cars_per_lane[m_TargetLane];
+	const optional<CarPrediction>& optional_car_up_front_target_lane = up_front_and_back_in_target_lane.first;
+	const optional<CarPrediction>& optional_car_behind_target_lane = up_front_and_back_in_target_lane.second;
+
+	if (optional_car_up_front_target_lane && optional_car_behind_target_lane)
+	{
+		if (optional_car_up_front_target_lane->m_PositionPredictions[0].m_s > ego_car.m_s + safety_distance_front &&
+			optional_car_behind_target_lane->m_PositionPredictions[0].m_s < ego_car.m_s - safety_distance_back)
+		{
+			cout << "Could change lanes" << endl;
+			m_CurrentManoeuver = Manoeuver::CHANGE_LANE;
+			m_TargetSpeed = optional_car_up_front_target_lane->m_SpeedPrediction;
+			m_TargetS = ego_car.m_s + (m_TargetSpeed + ego_car.m_v) / 2 * time_to_change_lane;
+			return create_trajectory_for_lane_change(
+				ego_car,
+				precalculated_trajectory,
+				map_waypoints_x,
+				map_waypoints_y,
+				map_waypoints_s,
+				time_to_change_lane);
+		}
+		else
+		{
+			cout << "Too tight to change lanes, should change velocity" << endl;
+			cout << "Current s of ego car: " << ego_car.m_s
+				<< ", s of car upfront: "
+				<< optional_car_up_front_target_lane->m_PositionPredictions[0].m_s
+				<< ", s of car behind: "
+				<< optional_car_behind_target_lane->m_PositionPredictions[0].m_s << endl;
+			m_TargetLane = current_ego_lane;
+			m_TargetSpeed = optional_car_behind_target_lane->m_SpeedPrediction - slow_down_margin;
+			m_CurrentManoeuver = Manoeuver::SLOW_DOWN_FOR_LANE_CHANGE;
+			m_CarIdToSlowdownFor = optional_car_behind_target_lane->m_CarId;
+			return create_trajectory_for_velocity_change(
+				ego_car,
+				precalculated_trajectory,
+				map_waypoints_x,
+				map_waypoints_y,
+				map_waypoints_s);
+		}
+	}
+	else if (optional_car_up_front_target_lane)
+	{
+		if (optional_car_up_front_target_lane->m_PositionPredictions[0].m_s > ego_car.m_s + safety_distance_front)
+		{
+			cout << "Could change lanes" << endl;
+			m_CurrentManoeuver = Manoeuver::CHANGE_LANE;
+			m_TargetSpeed = optional_car_up_front_target_lane->m_SpeedPrediction;
+			const float time_to_chance_lane = 2; // secs
+			m_TargetS = ego_car.m_s + (m_TargetSpeed + ego_car.m_v) / 2 * time_to_change_lane;
+			return create_trajectory_for_lane_change(
+				ego_car,
+				precalculated_trajectory,
+				map_waypoints_x,
+				map_waypoints_y,
+				map_waypoints_s,
+				time_to_change_lane);
+		}
+		else
+		{
+			cout << "Too tight to change lanes" << endl;
+			cout << "Current s of ego car: " << ego_car.m_s << ", s of car up front: "
+				<< optional_car_up_front_target_lane->m_PositionPredictions[0].m_s << endl;
+			m_TargetLane = current_ego_lane;
+			m_TargetSpeed = optional_car_up_front_target_lane->m_SpeedPrediction - slow_down_margin;
+			m_CurrentManoeuver = Manoeuver::SLOW_DOWN_FOR_LANE_CHANGE;
+			m_CarIdToSlowdownFor = optional_car_up_front_target_lane->m_CarId;
+			return create_trajectory_for_velocity_change(
+				ego_car,
+				precalculated_trajectory,
+				map_waypoints_x,
+				map_waypoints_y,
+				map_waypoints_s);
+		}
+	}
+	else if (optional_car_behind_target_lane)
+	{
+		if (optional_car_behind_target_lane->m_PositionPredictions[0].m_s < ego_car.m_s - safety_distance_back)
+		{
+			cout << "Could change lanes" << endl;
+			m_CurrentManoeuver = Manoeuver::CHANGE_LANE;
+			m_TargetSpeed = min(m_IdealSpeed, (float)ego_car.m_s + 5);
+			m_TargetS = ego_car.m_s + (m_TargetSpeed + ego_car.m_v) / 2 * time_to_change_lane;
+			return create_trajectory_for_lane_change(
+				ego_car,
+				precalculated_trajectory,
+				map_waypoints_x,
+				map_waypoints_y,
+				map_waypoints_s,
+				time_to_change_lane);
+		}
+		else
+		{
+			cout << "Too tight to change lanes" << endl;
+			cout << "Current s of ego car: " << ego_car.m_s << ", s of car behind: "
+				<< optional_car_behind_target_lane->m_PositionPredictions[0].m_s << endl;
+			m_TargetLane = current_ego_lane;
+			m_TargetSpeed = optional_car_behind_target_lane->m_SpeedPrediction - slow_down_margin;
+			m_CurrentManoeuver = Manoeuver::SLOW_DOWN_FOR_LANE_CHANGE;
+			m_CarIdToSlowdownFor = optional_car_behind_target_lane->m_CarId;
+			return create_trajectory_for_velocity_change(
+				ego_car,
+				precalculated_trajectory,
+				map_waypoints_x,
+				map_waypoints_y,
+				map_waypoints_s);
+		}
+	}
+	else
+	{
+		cout << "Could change lanes" << endl;
+		m_CurrentManoeuver = Manoeuver::CHANGE_LANE;
+		m_TargetSpeed = min(m_IdealSpeed, (float)ego_car.m_s + 5);
+		m_TargetS = ego_car.m_s + (m_TargetSpeed + ego_car.m_v) / 2 * time_to_change_lane;
+		return create_trajectory_for_lane_change(
+			ego_car,
+			precalculated_trajectory,
+			map_waypoints_x,
+			map_waypoints_y,
+			map_waypoints_s,
+			time_to_change_lane);
+	}
+}
+
 CalculatedTrajectory Behaviour::calculate_new_behaviour(
 	const CarState& ego_car,
 	const PredictionCalculator& prediction_calculator,
@@ -163,8 +314,26 @@ CalculatedTrajectory Behaviour::calculate_new_behaviour(
 	const vector<double>& map_waypoints_y,
 	const vector<double>& map_waypoints_s)
 {
-	cout << "Current state: " << (m_CurrentManoeuver == Manoeuver::FOLLOWING_LANE ? "Following lane" : "Change lane") << endl;
-	cout << "Current target speed: " << m_TargetSpeed << endl;
+	cout << "Current state: ";
+	switch (m_CurrentManoeuver)
+	{
+	case Manoeuver::FOLLOWING_LANE:
+	{
+		cout << "Following lane";
+		break;
+	}
+	case Manoeuver::CHANGE_LANE:
+	{
+		cout << "Change lane";
+		break;
+	}
+	case Manoeuver::SLOW_DOWN_FOR_LANE_CHANGE:
+	{
+		cout << "Slow down for lane change";
+		break;
+	}
+	}
+	cout << endl;
 
 	const unsigned int previous_size = precalculated_trajectory.m_previous_path_x.size();
 	const unsigned int future_point = min(previous_size, prediction_calculator.get_horizon()) - 1;
@@ -177,9 +346,7 @@ CalculatedTrajectory Behaviour::calculate_new_behaviour(
 		m_TotalLanes);
 	const unsigned int current_ego_lane = convert_from_d_to_lane(ego_car.m_d);
 
-	using CarsInLane = pair<optional<CarPrediction>, optional<CarPrediction>>;
 	vector<CarsInLane> cars_per_lane;
-	vector<EgoCarTarget> targets;
 	float fastest_velocity_up_front = 0;
 	float lane_with_fastest_velocity = 0;
 
@@ -217,167 +384,64 @@ CalculatedTrajectory Behaviour::calculate_new_behaviour(
 		float v_u = m_IdealSpeed;
 
 		const optional<CarPrediction>& optional_car_up_front = up_front_and_back.first;
+		double space_in_front_of_ego_car = max_distance_to_change_lane + 1;
 
-		if (optional_car_up_front && optional_car_up_front->m_PositionPredictions[0].m_s - ego_car.m_s < 30)
+		if (optional_car_up_front)
 		{
 			v_u = optional_car_up_front->m_SpeedPrediction;
+			space_in_front_of_ego_car = optional_car_up_front->m_PositionPredictions[0].m_s - ego_car.m_s;
 		}
 
 		cout << "Speed of car up front in lane if any: " << v_u << endl;
+		cout << "space_in_front_of_ego_car: " << space_in_front_of_ego_car << endl;
+		cout << "fastest_velocity_up_front: " << fastest_velocity_up_front << endl;
+		cout << "lane_with_fastest_velocity: " << lane_with_fastest_velocity << endl;
 
-		// If there is a faster lane
-		if (v_u <= fastest_velocity_up_front - min_speed_diff_to_change_lane)
+		// If there is a faster lane and the car up front is close enough so that we should consider a lane change
+		if (v_u <= fastest_velocity_up_front - min_speed_diff_to_change_lane && space_in_front_of_ego_car < max_distance_to_change_lane)
 		{
-			cout << "Current target lane: " << m_TargetLane;
-			cout << "Considering another lane: " << lane_with_fastest_velocity << endl;
-			cout << "Velocity there: " << fastest_velocity_up_front << endl;
-
-			if (lane_with_fastest_velocity < current_ego_lane)
-			{
-				m_TargetLane = current_ego_lane - 1;
-			}
-			else
-			{
-				m_TargetLane = current_ego_lane + 1;
-			}
-
-			const CarsInLane& up_front_and_back_in_target_lane = cars_per_lane[m_TargetLane];
-			const optional<CarPrediction>& optional_car_up_front_target_lane = up_front_and_back_in_target_lane.first;
-			const optional<CarPrediction>& optional_car_behind_target_lane = up_front_and_back_in_target_lane.second;
-
-			if (optional_car_up_front_target_lane && optional_car_behind_target_lane)
-			{
-				if (optional_car_up_front_target_lane->m_PositionPredictions[0].m_s > ego_car.m_s + safety_distance_front &&
-					optional_car_behind_target_lane->m_PositionPredictions[0].m_s < ego_car.m_s - safety_distance_back)
-				{
-					cout << "Could change lanes" << endl;
-					m_CurrentManoeuver = Manoeuver::CHANGE_LANE;
-					m_TargetSpeed = optional_car_up_front_target_lane->m_SpeedPrediction;
-					m_TargetS = ego_car.m_s + (m_TargetSpeed + ego_car.m_v) / 2 * time_to_change_lane;
-					return create_trajectory_for_lane_change(
-						ego_car,
-						prediction_calculator,
-						precalculated_trajectory,
-						map_waypoints_x,
-						map_waypoints_y,
-						map_waypoints_s,
-						time_to_change_lane);
-				}
-				else
-				{
-					cout << "Too tight to change lanes, should change velocity" << endl;
-					m_TargetLane = current_ego_lane;
-					m_TargetSpeed = optional_car_behind_target_lane->m_SpeedPrediction - slow_down_margin;
-					return create_trajectory_for_velocity_change(
-						ego_car,
-						prediction_calculator,
-						precalculated_trajectory,
-						map_waypoints_x,
-						map_waypoints_y,
-						map_waypoints_s);
-				}
-			}
-			else if (optional_car_up_front_target_lane)
-			{
-				if (optional_car_up_front_target_lane->m_PositionPredictions[0].m_s > ego_car.m_s + safety_distance_front)
-				{
-					cout << "Could change lanes" << endl;
-					m_CurrentManoeuver = Manoeuver::CHANGE_LANE;
-					m_TargetSpeed = optional_car_up_front_target_lane->m_SpeedPrediction;
-					const float time_to_chance_lane = 2; // secs
-					m_TargetS = ego_car.m_s + (m_TargetSpeed + ego_car.m_v) / 2 * time_to_change_lane;
-					return create_trajectory_for_lane_change(
-						ego_car,
-						prediction_calculator,
-						precalculated_trajectory,
-						map_waypoints_x,
-						map_waypoints_y,
-						map_waypoints_s,
-						time_to_change_lane);
-				}
-				else
-				{
-					cout << "Too tight to change lanes" << endl;
-					m_TargetLane = current_ego_lane;
-					m_TargetSpeed = optional_car_up_front_target_lane->m_SpeedPrediction - slow_down_margin;
-					return create_trajectory_for_velocity_change(
-						ego_car,
-						prediction_calculator,
-						precalculated_trajectory,
-						map_waypoints_x,
-						map_waypoints_y,
-						map_waypoints_s);
-				}
-			}
-			else if (optional_car_behind_target_lane)
-			{
-				if (optional_car_behind_target_lane->m_PositionPredictions[0].m_s < ego_car.m_s - safety_distance_back)
-				{
-					cout << "Could change lanes" << endl;
-					m_CurrentManoeuver = Manoeuver::CHANGE_LANE;
-					m_TargetSpeed = min(m_IdealSpeed, (float)ego_car.m_s + 5);
-					m_TargetS = ego_car.m_s + (m_TargetSpeed + ego_car.m_v) / 2 * time_to_change_lane;
-					return create_trajectory_for_lane_change(
-						ego_car,
-						prediction_calculator,
-						precalculated_trajectory,
-						map_waypoints_x,
-						map_waypoints_y,
-						map_waypoints_s,
-						time_to_change_lane);
-				}
-				else
-				{
-					cout << "Too tight to change lanes" << endl;
-					m_TargetLane = current_ego_lane;
-					m_TargetSpeed = optional_car_behind_target_lane->m_SpeedPrediction - slow_down_margin;
-					return create_trajectory_for_velocity_change(
-						ego_car,
-						prediction_calculator,
-						precalculated_trajectory,
-						map_waypoints_x,
-						map_waypoints_y,
-						map_waypoints_s);
-				}
-			}
-			else
-			{
-				cout << "Could change lanes" << endl;
-				m_CurrentManoeuver = Manoeuver::CHANGE_LANE;
-				m_TargetSpeed = min(m_IdealSpeed, (float)ego_car.m_s + 5);
-				m_TargetS = ego_car.m_s + (m_TargetSpeed + ego_car.m_v) / 2 * time_to_change_lane;
-				return create_trajectory_for_lane_change(
-					ego_car,
-					prediction_calculator,
-					precalculated_trajectory,
-					map_waypoints_x,
-					map_waypoints_y,
-					map_waypoints_s,
-					time_to_change_lane);
-			}
+			return consider_lane_change(
+				ego_car,
+				cars_per_lane, 
+				fastest_velocity_up_front, 
+				lane_with_fastest_velocity,
+				precalculated_trajectory, 
+				map_waypoints_x, 
+				map_waypoints_y, 
+				map_waypoints_s);
 		}
 		else // There is no faster lane
 		{
+			if (space_in_front_of_ego_car >= 30)
+			{
+				m_TargetSpeed = m_IdealSpeed;
+				return create_trajectory_for_velocity_change(
+					ego_car,
+					precalculated_trajectory,
+					map_waypoints_x,
+					map_waypoints_y,
+					map_waypoints_s);
+			}
+
 			if (m_TargetSpeed < v_u - acceleration_margin)
 			{
 				cout << "Should accelerate" << endl;
+
 				m_TargetSpeed = v_u;
 				return create_trajectory_for_velocity_change(
 					ego_car,
-					prediction_calculator,
 					precalculated_trajectory,
 					map_waypoints_x,
 					map_waypoints_y,
 					map_waypoints_s);
 			}
 			else if (m_TargetSpeed > v_u + acceleration_margin ||
-				(optional_car_up_front && optional_car_up_front->m_PositionPredictions[0].m_s - ego_car.m_s < 10))
+				(space_in_front_of_ego_car < 20))
 			{
 				cout << "Should decelerate" << endl;
-				m_TargetSpeed = v_u;
+				m_TargetSpeed = v_u - acceleration_margin;
 				return create_trajectory_for_velocity_change(
 					ego_car,
-					prediction_calculator,
 					precalculated_trajectory,
 					map_waypoints_x,
 					map_waypoints_y,
@@ -388,7 +452,6 @@ CalculatedTrajectory Behaviour::calculate_new_behaviour(
 				cout << "Keep same velocity" << endl;
 				return extend_trajectory(
 					ego_car,
-					prediction_calculator,
 					precalculated_trajectory,
 					map_waypoints_x,
 					map_waypoints_y,
@@ -414,7 +477,6 @@ CalculatedTrajectory Behaviour::calculate_new_behaviour(
 
 			return create_trajectory_for_lane_change(
 				ego_car,
-				prediction_calculator,
 				precalculated_trajectory,
 				map_waypoints_x,
 				map_waypoints_y,
@@ -427,7 +489,6 @@ CalculatedTrajectory Behaviour::calculate_new_behaviour(
 			m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
 			return extend_trajectory(
 				ego_car,
-				prediction_calculator,
 				precalculated_trajectory,
 				map_waypoints_x,
 				map_waypoints_y,
@@ -438,11 +499,100 @@ CalculatedTrajectory Behaviour::calculate_new_behaviour(
 			cout << "Keep on changing lanes" << endl;
 			return extend_trajectory(
 				ego_car,
-				prediction_calculator,
 				precalculated_trajectory,
 				map_waypoints_x,
 				map_waypoints_y,
 				map_waypoints_s);
+		}
+		break;
+	}
+	case Manoeuver::SLOW_DOWN_FOR_LANE_CHANGE:
+	{
+		const CarsInLane& up_front_and_back = cars_per_lane[current_ego_lane];
+
+		// v_u = velocity of the car upfront in current lane if any, else m_TargetSpeed
+		float v_u = m_IdealSpeed;
+
+		const optional<CarPrediction>& optional_car_up_front = up_front_and_back.first;
+
+		// We look at the car up front for a longer distance, because we are slowing down due the slowness of this car
+		if (optional_car_up_front && optional_car_up_front->m_PositionPredictions[0].m_s)
+		{
+			v_u = optional_car_up_front->m_SpeedPrediction;
+		}
+
+		cout << "Speed of car up front in lane if any: " << v_u << endl;
+
+		// If there is still a faster lane
+		if (v_u <= fastest_velocity_up_front - min_speed_diff_to_change_lane)
+		{
+			for (const CarPrediction& car_prediction : prediction_calculator.get_car_predictions())
+			{
+				if (car_prediction.m_CarId == m_CarIdToSlowdownFor)
+				{
+					if (ego_car.m_s < car_prediction.m_PositionPredictions[0].m_s - safety_distance_front)
+					{
+						cout << "Safety distance behind car to slow down for, back to following lane state" << endl;
+
+						return consider_lane_change(
+							ego_car,
+							cars_per_lane,
+							fastest_velocity_up_front,
+							lane_with_fastest_velocity,
+							precalculated_trajectory,
+							map_waypoints_x,
+							map_waypoints_y,
+							map_waypoints_s);
+					}
+					else
+					{
+						cout << "ego s: " << ego_car.m_s << ", slow down car s: " << car_prediction.m_PositionPredictions[0].m_s << endl;
+						cout << "Continue at slower speed" << endl;
+						return extend_trajectory(
+							ego_car,
+							precalculated_trajectory,
+							map_waypoints_x,
+							map_waypoints_y,
+							map_waypoints_s);
+					}
+				}
+			}
+
+			// Car to slow down for not found: retry in FOLLOWING_LANE state
+			cout << "Car to slow down for not found: retry in FOLLOWING_LANE state" << endl;
+			m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
+
+			return precalculated_trajectory;
+		}
+		else
+		{
+			cout << "No faster lane anymore, back to FOLLOWING_LANE state" << endl;
+			m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
+			return precalculated_trajectory;
+
+			if (m_TargetSpeed < v_u - acceleration_margin)
+			{
+				cout << "No faster lane anymore, should regain speed again" << endl;
+				m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
+				m_TargetSpeed = v_u;
+				return create_trajectory_for_velocity_change(
+					ego_car,
+					precalculated_trajectory,
+					map_waypoints_x,
+					map_waypoints_y,
+					map_waypoints_s);
+			}
+			else
+			{
+				cout << "No faster lane anymore, continue at same speed" << endl;
+				m_CurrentManoeuver = Manoeuver::FOLLOWING_LANE;
+				return extend_trajectory(
+					ego_car,
+					precalculated_trajectory,
+					map_waypoints_x,
+					map_waypoints_y,
+					map_waypoints_s);
+			}
 		}
 		break;
 	}
@@ -451,7 +601,6 @@ CalculatedTrajectory Behaviour::calculate_new_behaviour(
 
 CalculatedTrajectory Behaviour::create_trajectory_for_lane_change(
 	const CarState& ego_car,
-	const PredictionCalculator& prediction_calculator,
 	const CalculatedTrajectory& precalculated_trajectory,
 	const vector<double>& map_waypoints_x,
 	const vector<double>& map_waypoints_y,
@@ -677,7 +826,6 @@ CalculatedTrajectory Behaviour::create_trajectory_for_lane_change(
 
 CalculatedTrajectory Behaviour::create_trajectory_for_velocity_change(
 	const CarState& ego_car,
-	const PredictionCalculator& prediction_calculator,
 	const CalculatedTrajectory& precalculated_trajectory,
 	const std::vector<double>& map_waypoints_x,
 	const std::vector<double>& map_waypoints_y,
@@ -796,7 +944,6 @@ CalculatedTrajectory Behaviour::create_trajectory_for_velocity_change(
 
 CalculatedTrajectory Behaviour::extend_trajectory(
 	const CarState& ego_car,
-	const PredictionCalculator& prediction_calculator,
 	const CalculatedTrajectory& precalculated_trajectory,
 	const std::vector<double>& map_waypoints_x,
 	const std::vector<double>& map_waypoints_y,

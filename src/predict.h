@@ -17,9 +17,10 @@ struct CarPrediction
 {
 	std::vector<FrenetCoordinate> m_PositionPredictions;
 	float m_SpeedPrediction;
+	int m_CarId;
 
-	CarPrediction(const std::vector<FrenetCoordinate>& position_predictions, float speed_prediction) :
-		m_PositionPredictions(position_predictions), m_SpeedPrediction(speed_prediction) {}
+	CarPrediction(const std::vector<FrenetCoordinate>& position_predictions, float speed_prediction, int id) :
+		m_PositionPredictions(position_predictions), m_SpeedPrediction(speed_prediction), m_CarId(id) {}
 };
 
 class PredictionCalculator

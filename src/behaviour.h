@@ -5,6 +5,8 @@
 #include "predict.h"
 
 #include <vector>
+#include <utility>
+#include <optional>
 
 struct CalculatedTrajectory
 {
@@ -15,10 +17,13 @@ struct CalculatedTrajectory
 class Behaviour
 {
 public:
+	using CarsInLane = std::pair<std::optional<CarPrediction>, std::optional<CarPrediction>>;
+
 	enum class Manoeuver
 	{
 		FOLLOWING_LANE,
-		CHANGE_LANE
+		CHANGE_LANE,
+		SLOW_DOWN_FOR_LANE_CHANGE
 	};
 
 	Behaviour(
@@ -38,7 +43,6 @@ public:
 private:
 	CalculatedTrajectory create_trajectory_for_lane_change(
 		const CarState& ego_car,
-		const PredictionCalculator& prediction_calculator,
 		const CalculatedTrajectory& precalculated_trajectory,
 		const std::vector<double>& map_waypoints_x,
 		const std::vector<double>& map_waypoints_y,
@@ -47,7 +51,6 @@ private:
 
 	CalculatedTrajectory create_trajectory_for_velocity_change(
 		const CarState& ego_car,
-		const PredictionCalculator& prediction_calculator,
 		const CalculatedTrajectory& precalculated_trajectory,
 		const std::vector<double>& map_waypoints_x,
 		const std::vector<double>& map_waypoints_y,
@@ -55,7 +58,16 @@ private:
 
 	CalculatedTrajectory extend_trajectory(
 		const CarState& ego_car,
-		const PredictionCalculator& prediction_calculator,
+		const CalculatedTrajectory& precalculated_trajectory,
+		const std::vector<double>& map_waypoints_x,
+		const std::vector<double>& map_waypoints_y,
+		const std::vector<double>& map_waypoints_s);
+
+	CalculatedTrajectory consider_lane_change(
+		const CarState& ego_car,
+		const std::vector<CarsInLane>& cars_per_lane,
+		float fastest_velocity_up_front,
+		float lane_with_fastest_velocity,
 		const CalculatedTrajectory& precalculated_trajectory,
 		const std::vector<double>& map_waypoints_x,
 		const std::vector<double>& map_waypoints_y,
@@ -76,6 +88,7 @@ private:
 	unsigned int m_TargetLane;
 	float m_TargetSpeed; // meter per second
 	float m_TargetS;
+	int m_CarIdToSlowdownFor;
 	const unsigned int m_TotalLanes;
 };
 

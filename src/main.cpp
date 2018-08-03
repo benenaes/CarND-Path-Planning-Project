@@ -134,9 +134,9 @@ int main()
 			const vector<CarState> car_states = car_states_from_sensor_fusion(j[1]["sensor_fusion"]);
 
 			const double time_interval = 0.02; // 20 ms
-			const unsigned int max_distance = 60;
+			const unsigned int max_distance_for_prediction = 80; // 80 m
 			const unsigned int prediction_horizon = 50; // timesteps = 1 sec
-			PredictionCalculator prediction_calculator(car_states, ego_car_state, prediction_horizon, time_interval, max_distance);
+			PredictionCalculator prediction_calculator(car_states, ego_car_state, prediction_horizon, time_interval, max_distance_for_prediction);
 
 			const CalculatedTrajectory& calculated_trajectory = behaviour.calculate_new_behaviour(
 				ego_car_state, 

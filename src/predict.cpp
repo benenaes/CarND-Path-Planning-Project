@@ -31,7 +31,7 @@ PredictionCalculator::PredictionCalculator(
 				position_predictions.emplace_back(s + time_delta * j * v, d);
 			}
 
-			m_CarPredictions.emplace_back(position_predictions, v);
+			m_CarPredictions.emplace_back(position_predictions, v, other_car.m_id);
 		}
 	}
 }
